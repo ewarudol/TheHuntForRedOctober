@@ -5,8 +5,19 @@ using System.Text;
 using System.Threading.Tasks;
 
 namespace CzerwonyPazdziernik {
+	[Serializable]
     class AcceptMessage : Message {
         public int CurrentOccupancy { get; set; }
         public int LogicalClock { get; set; }
+		public List<int> LeavingCounters;
+
+		public AcceptMessage(int senderRank, int currentOccupancy, int logicalClock, List<int> leavingCounters)
+		{
+			SenderRank = senderRank;
+			CurrentOccupancy = currentOccupancy;
+			LogicalClock = logicalClock;
+			LeavingCounters = leavingCounters;
+			Type = Constants.MessageTypes.ACCEPT;
+		}
     }
 }

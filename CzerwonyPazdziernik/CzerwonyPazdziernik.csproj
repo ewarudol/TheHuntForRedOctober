@@ -48,6 +48,7 @@
   <ItemGroup>
     <Compile Include="Canal.cs" />
     <Compile Include="Constants.cs" />
+    <Compile Include="LeaveMessage.cs" />
     <Compile Include="DemandMessage.cs" />
     <Compile Include="AcceptMessage.cs" />
     <Compile Include="Message.cs" />

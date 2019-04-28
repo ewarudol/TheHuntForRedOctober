@@ -6,7 +6,9 @@ using System.Threading.Tasks;
 using static CzerwonyPazdziernik.Constants;
 
 namespace CzerwonyPazdziernik {
+	[Serializable]
     class Message {
-        public MessageTypes Type { get; set; }
-    }
+		public int SenderRank { get; set; }
+		public MessageTypes Type { get; set; }
+	}
 }

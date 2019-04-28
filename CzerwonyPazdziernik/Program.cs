@@ -1,54 +1,241 @@
-﻿/* Copyright (C) 2007  The Trustees of Indiana University
- *
- * Use, modification and distribution is subject to the Boost Software
- * License, Version 1.0. (See accompanying file LICENSE_1_0.txt or copy at
- * http://www.boost.org/LICENSE_1_0.txt)
- *  
- * Authors: Douglas Gregor
- *          Andrew Lumsdaine
- * 
- * This example program passes a message around a ring of processes,
- * where each processor adds its rank to the message string.
- */
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
+using System.Threading;
 using MPI;
+using static CzerwonyPazdziernik.Constants;
 
-namespace CzerwonyPazdziernik {
-    class Ring {
-        static void Main(string[] args) {
-            MPI.Environment.Run(ref args, comm => {
-                if (comm.Size < 2) {
-                    // Our ring needs at least two processes
-                    Console.WriteLine("The Ring example must be run with at least two processes.");
-                    Console.WriteLine("Try: mpiexec -np 4 ring.exe");
-                } else if (comm.Rank == 0) {
-                    // Rank 0 initiates communication around the ring
-                    string data = "Hello, World!";
+namespace CzerwonyPazdziernik
+{
+	class Program
+	{
 
-                    // Send "Hello, World!" to our right neighbor
-                    comm.Send(data, (comm.Rank + 1) % comm.Size, 0);
+		//Określenie liczby i rozmiarów kanałów
+		readonly static List<int> canalCapacities = new List<int>
+			{ 1 };
 
-                    // Receive data from our left neighbor
-                    comm.Receive((comm.Rank + comm.Size - 1) % comm.Size, 0, out data);
+		//Dane procesu
+		static ShipJournal journal;
+		static Random rand;
+		static EventWaitHandle waitForAcceptsHandle = new AutoResetEvent(false);
+		static EventWaitHandle waitForCommunicationHandle = new AutoResetEvent(true);
+		static Intracommunicator comm;
 
-                    // Add our own rank and write the results
-                    data += " 0";
-                    Console.WriteLine(data);
-                } else {
-                    // Receive data from our left neighbor
-                    string data;
-                    comm.Receive((comm.Rank + comm.Size - 1) % comm.Size, 0, out data);
+		public static void CommunicatorThread()
+		{
+			while (true)
+			{
+				comm.Receive(Communicator.anySource, Communicator.anyTag, out Message data);
 
-                    // Add our own rank to the data
-                    data = data + " " + comm.Rank.ToString() + ",";
+				waitForCommunicationHandle.WaitOne();
 
-                    // Pass on the intermediate to our right neighbor
-                    comm.Send(data, (comm.Rank + 1) % comm.Size, 0);
-                  // comm.Receive(Communicator.anySource)
-                }
-            });
-        }
-    }
+				//Obsłużenie otrzymania zgody
+				if (data.Type == MessageTypes.ACCEPT)
+				{
+					AcceptMessage msg = (AcceptMessage)data;
+
+					Console.WriteLine($"Proces {journal.shipRank}: dostałem ACCEPT od procesu {msg.SenderRank}.");
+
+					journal.Accepts.Add(msg);
+					if (journal.CanalOfInterest.CompareClocksAndUpdate(msg.LogicalClock)) //sprawdzenie zegara i aktualizacja zajętości, jeśli nowszy
+					{
+						journal.CanalOfInterest.CurrentOccupancy = msg.CurrentOccupancy;
+						journal.RememberedLeavingCounters = msg.LeavingCounters;
+					}
+
+					if (journal.Accepts.Count == journal.processesNumber - 1) //wszystkie zgody otrzymane
+					{
+						journal.CanalOfInterest.CurrentOccupancy++;
+
+						//oznaczamy miejsca zwolnione przez procesy, o których wiemy, że wyszły z kanału, a wysyłający nam najświeższą zgodę nie zdążył się o tym dowiedzieć przed wysłaniem
+						for (int i = 0; i < msg.LeavingCounters.Count; i++)
+						{
+							if (journal.CanalOfInterest.LeavingCounters[i] > journal.RememberedLeavingCounters[i])
+							{
+								Console.WriteLine($"Proces {journal.shipRank}: muszę zaktualizować current occupancy! Według mnie leaving counter dla procesu {i} wynosi {journal.CanalOfInterest.LeavingCounters[i]}, a według drugiego procesu {journal.RememberedLeavingCounters[i]}.");
+								journal.CanalOfInterest.CurrentOccupancy -= journal.CanalOfInterest.LeavingCounters[i] - journal.RememberedLeavingCounters[i];
+							}
+						}
+
+						if (journal.CanalOfInterest.CurrentOccupancy == journal.CanalOfInterest.maxOccupancy)
+							journal.IsBlockingCanalEntry = true;
+
+						journal.IsDemandingEntry = false;
+						journal.CanalOfInterest.IncrementClock();
+
+						journal.Accepts.Clear();
+						waitForAcceptsHandle.Set(); //zwolnienie blokady
+					}
+				}
+
+				//Obsłużenie otrzymania żądania
+				if (data.Type == MessageTypes.DEMAND)
+				{
+					DemandMessage msg = (DemandMessage)data;
+
+					Console.WriteLine($"Proces {journal.shipRank}: dostałem DEMAND od procesu {msg.SenderRank}.");
+
+					bool accept = false;
+					if (msg.Direction != journal.DirectionOfInterest) //jeśli żądany jest przeciwny kierunek do naszego
+					{
+						if (journal.CanalOfInterest == null || msg.Canal != journal.CanalOfInterest.ID) //jeśli żądany jest kanał, który nas nie obchodzi
+							accept = true;
+						else if (journal.IsDemandingEntry && msg.SenderRank > journal.shipRank && journal.Accepts.Where(x => x.SenderRank == msg.SenderRank).FirstOrDefault() == null) //jeśli nie jesteśmy jeszcze w kanale, a konkurujący ma wyższą rangę i nie dał nam jeszcze zgody samemu
+							accept = true;
+					}
+					else //jeśli żądany jest ten sam kierunek
+					{
+						if (journal.CanalOfInterest == null || msg.Canal != journal.CanalOfInterest.ID) //jeśli żądany jest kanał, który nas nie obchodzi
+							accept = true;
+						else if (journal.IsDemandingEntry && msg.SenderRank > journal.shipRank && journal.Accepts.Where(x => x.SenderRank == msg.SenderRank).FirstOrDefault() == null) //jeśli nie jesteśmy jeszcze w kanale, a konkurujący ma wyższą rangę i nie dał nam jeszcze zgody samemu
+							accept = true;
+						else if (!journal.IsDemandingEntry && !journal.IsBlockingCanalEntry) //jeśli jesteśmy w kanale (nie ubiegamy się o dostęp), ale nie blokujemy dostępu do kanału
+							accept = true;
+					}
+
+					if (accept)
+					{
+						Canal desiredCanal = journal.ExistingCanals[msg.Canal];
+						int currentOccupancy = desiredCanal.CurrentOccupancy;
+						int logicalClock = desiredCanal.LogicalClock;
+						List<int> leavingCounters = desiredCanal.LeavingCounters;
+						Console.WriteLine($"Proces {journal.shipRank}: Wysyłam zgodę, według mnie leaving counter żądającego w żądanym kanale to {leavingCounters[msg.SenderRank]}.");
+						AcceptMessage acceptMessage = new AcceptMessage(journal.shipRank, currentOccupancy, logicalClock, leavingCounters);
+						string logString = $"Proces {journal.shipRank}: wysyłana zgoda ma następujące wartości pól - Ranga: {acceptMessage.SenderRank}, Zajętość: {acceptMessage.CurrentOccupancy}, Zegar: {acceptMessage.LogicalClock}, Leaving counters: ";
+						foreach (int process in acceptMessage.LeavingCounters)
+							logString += $"{process} ";
+						Console.WriteLine(logString);
+						comm.Send(acceptMessage, msg.SenderRank, 1);
+					}
+					else
+
+					{
+						if (msg.Direction == journal.DirectionOfInterest)
+							journal.DemandsForSameDirection.Add(msg);
+						else
+							journal.DemandsForOppositeDirection.Add(msg);
+					}
+				}
+
+				//Obsłużenie otrzymania wiadomości o wyjściu z kanału
+				if (data.Type == MessageTypes.LEAVE)
+				{
+					LeaveMessage msg = (LeaveMessage)data;
+
+					//Inkrementacja licznika wyjść procesu z kanału
+					journal.ExistingCanals[msg.Canal].LeavingCounters[msg.SenderRank]++;
+
+					Console.WriteLine($"Proces {journal.shipRank}: dostałem LEAVE od procesu {msg.SenderRank}.");
+
+					//Jeśli jesteśmy blokującym procesem w tym kanale, zwalniamy miejsce i wysyłamy zgodę wszystkim na naszej liście oczekujących w tym samym kierunku
+					if (journal.CanalOfInterest != null && journal.CanalOfInterest.ID == msg.Canal && journal.IsBlockingCanalEntry)
+					{
+						journal.CanalOfInterest.CurrentOccupancy--;
+
+						int currentOccupancy = journal.CanalOfInterest.CurrentOccupancy;
+						int logicalClock = journal.CanalOfInterest.LogicalClock;
+						List<int> leavingCounters = journal.CanalOfInterest.LeavingCounters;
+						AcceptMessage accept = new AcceptMessage(journal.shipRank, currentOccupancy, logicalClock, leavingCounters);
+
+						foreach (DemandMessage demand in journal.DemandsForSameDirection)
+							comm.Send(accept, demand.SenderRank, 1);
+						journal.DemandsForSameDirection.Clear();
+
+						journal.IsBlockingCanalEntry = false;
+						journal.DemandsForSameDirection.Clear();
+					}
+				}
+
+				waitForCommunicationHandle.Set();
+			}
+		}
+
+		//mpiexec -np 4 CzerwonyPazdziernik.exe
+		static void Main(string[] args)
+		{
+			MPI.Environment.Run(ref args, receivedComm =>
+			{
+				//Inicjalizacja
+				comm = receivedComm;
+				journal = new ShipJournal(canalCapacities, comm.Size, comm.Rank);
+				rand = new Random();
+
+				//Uruchomienie wątku komunikacyjnego
+				Thread communicator = new Thread(new ThreadStart(CommunicatorThread));
+				communicator.Start();
+
+				while (true)
+				{
+					Console.WriteLine($"Proces {journal.shipRank}: rozpoczynam lokalne przetwarzanie.");
+
+					//Symulacja lokalnego przetwarzania (magazynowanie/ameryka)
+					Thread.Sleep(rand.Next(4) * 1000);
+
+					waitForCommunicationHandle.WaitOne();
+					{
+						//Wylosuj obiekt pożądania (kanał)
+						journal.CanalOfInterest = journal.ExistingCanals[rand.Next(journal.ExistingCanals.Count)];
+
+						Console.WriteLine($"Proces {journal.shipRank}: ubiegam się o kanał o numerze {journal.CanalOfInterest.ID}.");
+
+						//Wyślij żądania i ustaw remembered leaving counters na własne (jesteśmy "swoją pierwszą zgodą")
+						journal.IsDemandingEntry = true;
+						journal.RememberedLeavingCounters = journal.CanalOfInterest.LeavingCounters;
+						for (int i = 0; i < journal.processesNumber; i++)
+							if (i != journal.shipRank)
+								comm.Send(new DemandMessage(journal.shipRank, journal.CanalOfInterest.ID, journal.DirectionOfInterest), i, 1);
+					}
+					waitForCommunicationHandle.Set();
+
+					//Czekaj na sygnał od drugiego wątku, że mamy już wszystkie zgody
+					waitForAcceptsHandle.WaitOne();
+
+					Console.WriteLine($"Proces {journal.shipRank}: wchodzę do kanału o numerze {journal.CanalOfInterest.ID} i rozpoczynam podróż. Według mnie zajętość kanału to {journal.CanalOfInterest.CurrentOccupancy}/{journal.CanalOfInterest.maxOccupancy}");
+
+					//Symulacja lokalnego przetwarzania (podróż kanałem)
+					Thread.Sleep(rand.Next(4) * 1000);
+
+					string printDirection = journal.DirectionOfInterest == Directions.WEST ? "zachodzie" : "wschodzie";
+					Console.WriteLine($"Proces {journal.shipRank}: opuszczam kanał o numerze {journal.CanalOfInterest.ID}. Znajduję się teraz na {printDirection}.");
+
+					waitForCommunicationHandle.WaitOne();
+					{
+						//Zinkrementuj licznik wyjść z kanału i wyślij informację o wyjściu
+						journal.CanalOfInterest.LeavingCounters[journal.shipRank]++;
+						Console.WriteLine($"Proces {journal.shipRank}: mój leaving counter kanału to: {journal.CanalOfInterest.LeavingCounters[journal.shipRank]}.");
+						for (int i = 0; i < journal.processesNumber; i++)
+							if (i != journal.shipRank)
+								comm.Send(new LeaveMessage(journal.shipRank, journal.CanalOfInterest.ID), i, 1);
+
+						//Obniż zajętość i wyślij naszą zgodę na wejście tych, którzy chcieli wejść z przeciwnej strony (niech drugi wątek w tym nie przeszkadza, np. przez dodawanie nowych żądań do listy)
+						journal.CanalOfInterest.CurrentOccupancy--;
+						int currentOccupancy = journal.CanalOfInterest.CurrentOccupancy;
+						int logicalClock = journal.CanalOfInterest.LogicalClock;
+						List<int> leavingCounters = journal.CanalOfInterest.LeavingCounters;
+						AcceptMessage accept = new AcceptMessage(journal.shipRank, currentOccupancy, logicalClock, leavingCounters);
+						foreach (DemandMessage demand in journal.DemandsForOppositeDirection)
+						{
+							comm.Send(accept, demand.SenderRank, 1);
+							Console.WriteLine($"Proces {journal.shipRank}: wysłałem procesowi {demand.SenderRank} ACCEPT.");
+						}
+						foreach (DemandMessage demand in journal.DemandsForSameDirection)
+						{
+							comm.Send(accept, demand.SenderRank, 1);
+							Console.WriteLine($"Proces {journal.shipRank}: wysłałem procesowi {demand.SenderRank} ACCEPT.");
+						}
+						journal.DemandsForOppositeDirection.Clear();
+						journal.DemandsForSameDirection.Clear();
+
+						//Oznaczamy wyjście z kanału
+						journal.CanalOfInterest = null;
+
+						//Zmień kierunek
+						journal.SwitchDirection();
+					}
+					waitForCommunicationHandle.Set();
+				}
+			});
+		}
+	}
 }
