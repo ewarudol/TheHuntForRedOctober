@@ -16,7 +16,6 @@ namespace CzerwonyPazdziernik {
 			SenderRank = senderRank;
 			Canal = canal;
 			Direction = direction;
-			Type = Constants.MessageTypes.DEMAND;
         }
     }
 }

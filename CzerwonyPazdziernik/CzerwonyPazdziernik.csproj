@@ -52,6 +52,7 @@
     <Compile Include="DemandMessage.cs" />
     <Compile Include="AcceptMessage.cs" />
     <Compile Include="Message.cs" />
+    <Compile Include="MessageArrays.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="ShipJournal.cs" />

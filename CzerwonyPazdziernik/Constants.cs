@@ -8,6 +8,10 @@ namespace CzerwonyPazdziernik
 {
 	static class Constants
 	{
+		public const int MSG_ACCEPT = 0;
+		public const int MSG_DEMAND = 1;
+		public const int MSG_LEAVE = 2;
+
 		public enum MessageTypes
 		{
 			DEMAND,

@@ -11,7 +11,8 @@ namespace CzerwonyPazdziernik
 	class Program
 	{
 
-		//Określenie liczby i rozmiarów kanałów
+		//Określenie liczby i rozmiarów kanałów, szybkości wykonywania
+		const int speed = 2500;
 		readonly static List<int> canalCapacities = new List<int>
 			{ 1 };
 
@@ -26,14 +27,18 @@ namespace CzerwonyPazdziernik
 		{
 			while (true)
 			{
-				comm.Receive(Communicator.anySource, Communicator.anyTag, out Message data);
+				var probeResult = comm.Probe(Communicator.anySource, Communicator.anyTag);
 
 				waitForCommunicationHandle.WaitOne();
 
+				Console.WriteLine($"Proces {journal.shipRank}: zamierzam odebrać wiadomość o tagu {probeResult.Tag}.");
+
 				//Obsłużenie otrzymania zgody
-				if (data.Type == MessageTypes.ACCEPT)
+				if (probeResult.Tag == MSG_ACCEPT)
 				{
-					AcceptMessage msg = (AcceptMessage)data;
+					int[] msgArray = new int[3+journal.processesNumber];
+					comm.Receive(Communicator.anySource, MSG_ACCEPT, ref msgArray);
+					AcceptMessage msg = MessageArrays.AcceptArrayToMsg(msgArray);
 
 					Console.WriteLine($"Proces {journal.shipRank}: dostałem ACCEPT od procesu {msg.SenderRank}.");
 
@@ -61,6 +66,8 @@ namespace CzerwonyPazdziernik
 						if (journal.CanalOfInterest.CurrentOccupancy == journal.CanalOfInterest.maxOccupancy)
 							journal.IsBlockingCanalEntry = true;
 
+						//TUTAJ DOPISAĆ WYSYŁANIE ZGÓD Z LISTY ŻADAŃ W TYM SAMYM KIERUNKU JEŚLI NIE BLOKUJEMY KANAŁU
+
 						journal.IsDemandingEntry = false;
 						journal.CanalOfInterest.IncrementClock();
 
@@ -70,9 +77,11 @@ namespace CzerwonyPazdziernik
 				}
 
 				//Obsłużenie otrzymania żądania
-				if (data.Type == MessageTypes.DEMAND)
+				if (probeResult.Tag == MSG_DEMAND)
 				{
-					DemandMessage msg = (DemandMessage)data;
+					int[] msgArray = new int[3];
+					comm.Receive(Communicator.anySource, MSG_DEMAND, ref msgArray);
+					DemandMessage msg = MessageArrays.DemandArrayToMsg(msgArray);
 
 					Console.WriteLine($"Proces {journal.shipRank}: dostałem DEMAND od procesu {msg.SenderRank}.");
 
@@ -102,11 +111,12 @@ namespace CzerwonyPazdziernik
 						List<int> leavingCounters = desiredCanal.LeavingCounters;
 						Console.WriteLine($"Proces {journal.shipRank}: Wysyłam zgodę, według mnie leaving counter żądającego w żądanym kanale to {leavingCounters[msg.SenderRank]}.");
 						AcceptMessage acceptMessage = new AcceptMessage(journal.shipRank, currentOccupancy, logicalClock, leavingCounters);
+						int[] acceptArray = MessageArrays.AcceptMsgToArray(acceptMessage);
 						string logString = $"Proces {journal.shipRank}: wysyłana zgoda ma następujące wartości pól - Ranga: {acceptMessage.SenderRank}, Zajętość: {acceptMessage.CurrentOccupancy}, Zegar: {acceptMessage.LogicalClock}, Leaving counters: ";
 						foreach (int process in acceptMessage.LeavingCounters)
 							logString += $"{process} ";
 						Console.WriteLine(logString);
-						comm.Send(acceptMessage, msg.SenderRank, 1);
+						comm.Send(acceptArray, msg.SenderRank, MSG_ACCEPT);
 					}
 					else
 
@@ -119,9 +129,11 @@ namespace CzerwonyPazdziernik
 				}
 
 				//Obsłużenie otrzymania wiadomości o wyjściu z kanału
-				if (data.Type == MessageTypes.LEAVE)
+				if (probeResult.Tag == MSG_LEAVE)
 				{
-					LeaveMessage msg = (LeaveMessage)data;
+					int[] msgArray = new int[2];
+					comm.Receive(Communicator.anySource, MSG_LEAVE, ref msgArray);
+					LeaveMessage msg = MessageArrays.LeaveArrayToMsg(msgArray);
 
 					//Inkrementacja licznika wyjść procesu z kanału
 					journal.ExistingCanals[msg.Canal].LeavingCounters[msg.SenderRank]++;
@@ -137,9 +149,10 @@ namespace CzerwonyPazdziernik
 						int logicalClock = journal.CanalOfInterest.LogicalClock;
 						List<int> leavingCounters = journal.CanalOfInterest.LeavingCounters;
 						AcceptMessage accept = new AcceptMessage(journal.shipRank, currentOccupancy, logicalClock, leavingCounters);
+						int[] acceptArray = MessageArrays.AcceptMsgToArray(accept);
 
 						foreach (DemandMessage demand in journal.DemandsForSameDirection)
-							comm.Send(accept, demand.SenderRank, 1);
+							comm.Send(acceptArray, demand.SenderRank, MSG_ACCEPT);
 						journal.DemandsForSameDirection.Clear();
 
 						journal.IsBlockingCanalEntry = false;
@@ -154,23 +167,28 @@ namespace CzerwonyPazdziernik
 		//mpiexec -np 4 CzerwonyPazdziernik.exe
 		static void Main(string[] args)
 		{
-			MPI.Environment.Run(ref args, receivedComm =>
+			MPI.Environment.Run(ref args, Threading.Multiple, receivedComm =>
 			{
 				//Inicjalizacja
 				comm = receivedComm;
 				journal = new ShipJournal(canalCapacities, comm.Size, comm.Rank);
+
+				//Inicjalizacja losowości
+				Thread.Sleep(comm.Rank);
 				rand = new Random();
 
 				//Uruchomienie wątku komunikacyjnego
 				Thread communicator = new Thread(new ThreadStart(CommunicatorThread));
 				communicator.Start();
 
+				Console.WriteLine($"Proces {journal.shipRank}: jest łącznie {journal.processesNumber} procesów.");
+
 				while (true)
 				{
 					Console.WriteLine($"Proces {journal.shipRank}: rozpoczynam lokalne przetwarzanie.");
 
 					//Symulacja lokalnego przetwarzania (magazynowanie/ameryka)
-					Thread.Sleep(rand.Next(4) * 1000);
+					Thread.Sleep(rand.Next(4) * speed);
 
 					waitForCommunicationHandle.WaitOne();
 					{
@@ -182,9 +200,11 @@ namespace CzerwonyPazdziernik
 						//Wyślij żądania i ustaw remembered leaving counters na własne (jesteśmy "swoją pierwszą zgodą")
 						journal.IsDemandingEntry = true;
 						journal.RememberedLeavingCounters = journal.CanalOfInterest.LeavingCounters;
+						DemandMessage demand = new DemandMessage(journal.shipRank, journal.CanalOfInterest.ID, journal.DirectionOfInterest);
+						int[] demandArray = MessageArrays.DemandMsgToArray(demand);
 						for (int i = 0; i < journal.processesNumber; i++)
 							if (i != journal.shipRank)
-								comm.Send(new DemandMessage(journal.shipRank, journal.CanalOfInterest.ID, journal.DirectionOfInterest), i, 1);
+								comm.Send(demandArray, i, MSG_DEMAND);
 					}
 					waitForCommunicationHandle.Set();
 
@@ -194,7 +214,7 @@ namespace CzerwonyPazdziernik
 					Console.WriteLine($"Proces {journal.shipRank}: wchodzę do kanału o numerze {journal.CanalOfInterest.ID} i rozpoczynam podróż. Według mnie zajętość kanału to {journal.CanalOfInterest.CurrentOccupancy}/{journal.CanalOfInterest.maxOccupancy}");
 
 					//Symulacja lokalnego przetwarzania (podróż kanałem)
-					Thread.Sleep(rand.Next(4) * 1000);
+					Thread.Sleep(rand.Next(4) * speed);
 
 					string printDirection = journal.DirectionOfInterest == Directions.WEST ? "zachodzie" : "wschodzie";
 					Console.WriteLine($"Proces {journal.shipRank}: opuszczam kanał o numerze {journal.CanalOfInterest.ID}. Znajduję się teraz na {printDirection}.");
@@ -204,9 +224,11 @@ namespace CzerwonyPazdziernik
 						//Zinkrementuj licznik wyjść z kanału i wyślij informację o wyjściu
 						journal.CanalOfInterest.LeavingCounters[journal.shipRank]++;
 						Console.WriteLine($"Proces {journal.shipRank}: mój leaving counter kanału to: {journal.CanalOfInterest.LeavingCounters[journal.shipRank]}.");
+						LeaveMessage leave = new LeaveMessage(journal.shipRank, journal.CanalOfInterest.ID);
+						int[] leaveArray = MessageArrays.LeaveMsgToArray(leave);
 						for (int i = 0; i < journal.processesNumber; i++)
 							if (i != journal.shipRank)
-								comm.Send(new LeaveMessage(journal.shipRank, journal.CanalOfInterest.ID), i, 1);
+								comm.Send(leaveArray, i, MSG_LEAVE);
 
 						//Obniż zajętość i wyślij naszą zgodę na wejście tych, którzy chcieli wejść z przeciwnej strony (niech drugi wątek w tym nie przeszkadza, np. przez dodawanie nowych żądań do listy)
 						journal.CanalOfInterest.CurrentOccupancy--;
@@ -214,14 +236,15 @@ namespace CzerwonyPazdziernik
 						int logicalClock = journal.CanalOfInterest.LogicalClock;
 						List<int> leavingCounters = journal.CanalOfInterest.LeavingCounters;
 						AcceptMessage accept = new AcceptMessage(journal.shipRank, currentOccupancy, logicalClock, leavingCounters);
+						int[] acceptArray = MessageArrays.AcceptMsgToArray(accept);
 						foreach (DemandMessage demand in journal.DemandsForOppositeDirection)
 						{
-							comm.Send(accept, demand.SenderRank, 1);
+							comm.Send(acceptArray, demand.SenderRank, MSG_ACCEPT);
 							Console.WriteLine($"Proces {journal.shipRank}: wysłałem procesowi {demand.SenderRank} ACCEPT.");
 						}
 						foreach (DemandMessage demand in journal.DemandsForSameDirection)
 						{
-							comm.Send(accept, demand.SenderRank, 1);
+							comm.Send(acceptArray, demand.SenderRank, MSG_ACCEPT);
 							Console.WriteLine($"Proces {journal.shipRank}: wysłałem procesowi {demand.SenderRank} ACCEPT.");
 						}
 						journal.DemandsForOppositeDirection.Clear();

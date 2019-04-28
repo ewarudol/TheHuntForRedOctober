@@ -13,7 +13,6 @@ namespace CzerwonyPazdziernik {
         public LeaveMessage(int senderRank, int canal) {
             SenderRank = senderRank;
             Canal = canal;
-			Type = Constants.MessageTypes.LEAVE;
         }
     }
 }
