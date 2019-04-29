@@ -9,5 +9,6 @@ namespace CzerwonyPazdziernik {
 	[Serializable]
     class Message {
 		public int SenderRank { get; set; }
+		public int Timestamp { get; set; }
 	}
 }

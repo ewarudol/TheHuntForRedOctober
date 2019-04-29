@@ -11,9 +11,10 @@ namespace CzerwonyPazdziernik {
         public int Canal { get; set; }
 		public Constants.Directions Direction { get; set; }
 		
-        public DemandMessage(int senderRank, int canal, Constants.Directions direction)
+        public DemandMessage(int senderRank, int timestamp, int canal, Constants.Directions direction)
 		{
 			SenderRank = senderRank;
+			Timestamp = timestamp;
 			Canal = canal;
 			Direction = direction;
         }

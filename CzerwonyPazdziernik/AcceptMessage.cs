@@ -13,9 +13,10 @@ namespace CzerwonyPazdziernik
 		public int LogicalClock { get; set; }
 		public List<int> LeavingCounters { get; set; }
 
-		public AcceptMessage(int senderRank, int currentOccupancy, int logicalClock, List<int> leavingCounters)
+		public AcceptMessage(int senderRank, int timestamp, int currentOccupancy, int logicalClock, List<int> leavingCounters)
 		{
 			SenderRank = senderRank;
+			Timestamp = timestamp;
 			CurrentOccupancy = currentOccupancy;
 			LogicalClock = logicalClock;
 			LeavingCounters = leavingCounters;
