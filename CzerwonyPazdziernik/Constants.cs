@@ -12,13 +12,6 @@ namespace CzerwonyPazdziernik
 		public const int MSG_DEMAND = 1;
 		public const int MSG_LEAVE = 2;
 
-		public enum MessageTypes
-		{
-			DEMAND,
-			ACCEPT,
-			LEAVE
-		}
-
 		public enum Directions
 		{
 			WEST,
